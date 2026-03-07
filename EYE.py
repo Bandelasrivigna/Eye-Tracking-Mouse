@@ -1,3 +1,12 @@
+
+"""
+This module provides the primary capabilities of the Eye Tracking Interface. The system allows users to move the computer cursor by using facial gestures and eye blinks. It utilizes a webcam to stream video and uses MediaPipe Face Mesh to recognize the face mesh. The position of the nose landmark is mapped to move the cursor fluidly across the screen.
+
+For the system to replicate mouse activity, the Eye Aspect Ratio (EAR) is computed to recognize eye blinks. A single blink is interpreted as a mouse right-click and a double blink is interpreted as a mouse left-click. Cursor movement is smoothed to create a stable and natural user experience.
+
+This module is the base of the entire project and provides an example of how computer vision can replace computer input devices, allowing the user to control the computer by just using their hands.
+"""
+
 import cv2
 import mediapipe as mp
 import pyautogui
@@ -123,4 +132,5 @@ while True:
 
 
 cap.release()
+
 cv2.destroyAllWindows()
