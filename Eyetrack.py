@@ -268,7 +268,7 @@ while True:
 
     if state == 'starting' and time.time() >= start_countdown_end:
         state = 'active'
-        print("Countdown finished: now active")
+        print("Countdown finished: now active.")
 
     if exit_app:
         break
