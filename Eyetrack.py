@@ -1,282 +1,295 @@
-import time
+import os
+import tkinter as tk
+from datetime import datetime
+from tkinter import ttk
 
 import cv2
-import mediapipe as mp
-import numpy as np
-import pyautogui
-import pyttsx3
+import openpyxl  # Added for Excel logging
+from PIL import Image, ImageTk
 
-mp_face_mesh = mp.solutions.face_mesh
-face_mesh = mp_face_mesh.FaceMesh(refine_landmarks=True)
+from controller import FaceHandController
 
-tts_engine = pyttsx3.init()
-tts_engine.setProperty('rate', 150)    # Speed of speech
-tts_engine.setProperty('volume', 0.9)  # Volume (0.0 to 1.0)
 
-screen_w, screen_h = pyautogui.size()
+class PremiumApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Face & Hand Controlled Mouse")
+        self.root.geometry("1280x800")
+        self.root.minsize(1000, 600)
+        self.root.configure(bg='#f0f2f5')
 
-prev_x, prev_y = 0, 0
-smoothening = 6
+        # Variables
+        self.status_var = tk.StringVar(value="System ready")
+        self.quick_buttons = []
+        self.smooth_var = tk.IntVar(value=2)
+        self.click_duration_var = tk.DoubleVar(value=2.0)
+        self.excel_file = "tracking_details.xlsx"
 
-LEFT_EYE = [33, 160, 158, 133, 153, 144]
-RIGHT_EYE = [362, 385, 387, 263, 373, 380]
+        # Initialize the Excel Log
+        self.init_excel_log()
 
-BLINK_THRESHOLD = 0.20        # EAR below this = eye closed
-long_closure_start = 0
-long_closure_triggered = False
-LONG_CLOSURE_DURATION = 2.0   # seconds to trigger a long‑closure click
-LONG_CLOSURE_ACTION = pyautogui.leftClick   # function (no parentheses)
+        # Setup custom style
+        self.setup_styles()
 
-state = 'idle'
-start_countdown_end = 0
+        # Build UI with grid layout (half video, half controls)
+        self.setup_ui_grid()
 
-nod_count = 0
-nod_state = 'up'               # 'up' or 'down'
-nod_start_time = 0
-NOD_THRESHOLD = 15             # vertical movement (pixels) to count as nod
-NOD_TIMEOUT = 3.0              # seconds to complete 3 nods
+        # Controller instance
+        self.controller = FaceHandController(
+            callback=self.update_gui,
+            on_long_click=self.handle_button_click
+        )
 
-lr_state = 'neutral'           # 'neutral', 'left', 'right'
-lr_count = 0
-lr_start_time = 0
-LR_THRESHOLD = 20              # horizontal movement (pixels)
-LR_TIMEOUT = 3.0               # seconds to complete pattern
+        # Update button positions after window is ready
+        self.root.after(500, self.update_button_rects)
+        self.root.bind("<Configure>", self.on_window_resize)
 
-window_name = "Face Mouse Control"
-cv2.namedWindow(window_name)
-VIDEO_WIDTH, VIDEO_HEIGHT = 640, 480
-VIDEO_X, VIDEO_Y = 20, 20
+        # Bind sensitivity changes
+        self.smooth_var.trace_add('write', self.update_sensitivity)
+        self.click_duration_var.trace_add('write', self.update_click_duration)
 
-BUTTON_WIDTH, BUTTON_HEIGHT = 150, 50
-START_BTN = (700, 50, 850, 100)
-STOP_BTN  = (700, 120, 850, 170)
-CLOSE_BTN = (700, 190, 850, 240)
+    def init_excel_log(self):
+        """Creates the Excel file with headers if it doesn't exist."""
+        if not os.path.exists(self.excel_file):
+            try:
+                wb = openpyxl.Workbook()
+                ws = wb.active
+                ws.title = "Action Logs"
+                ws.append(["Date", "Time", "Action"])
+                wb.save(self.excel_file)
+                print(f"Created new tracking file: {self.excel_file}")
+            except Exception as e:
+                print(f"Error creating Excel file: {e}")
 
-exit_app = False   # when True, program will close
+    def log_action(self, action):
+        """Appends a new action to the Excel file with the current timestamp."""
+        try:
+            now = datetime.now()
+            date_str = now.strftime("%Y-%m-%d")
+            time_str = now.strftime("%H:%M:%S")
+            
+            wb = openpyxl.load_workbook(self.excel_file)
+            ws = wb.active
+            ws.append([date_str, time_str, action])
+            wb.save(self.excel_file)
+            print(f"Logged to Excel: {action}")
+        except Exception as e:
+            print(f"Failed to log action to Excel: {e}")
 
-def eye_aspect_ratio(landmarks, eye_points, frame_w, frame_h):
-    points = []
-    for p in eye_points:
-        x = int(landmarks[p].x * frame_w)
-        y = int(landmarks[p].y * frame_h)
-        points.append((x, y))
-    v1 = np.linalg.norm(np.array(points[1]) - np.array(points[5]))
-    v2 = np.linalg.norm(np.array(points[2]) - np.array(points[4]))
-    h  = np.linalg.norm(np.array(points[0]) - np.array(points[3]))
-    ear = (v1 + v2) / (2.0 * h)
-    return ear
+    def setup_styles(self):
+        style = ttk.Style()
+        style.theme_use('clam')
 
-def mouse_callback(event, x, y, flags, param):
-    global state, start_countdown_end, exit_app
-    if event == cv2.EVENT_LBUTTONDOWN:
-        # Start button
-        if (START_BTN[0] <= x <= START_BTN[2] and
-            START_BTN[1] <= y <= START_BTN[3]):
-            if state != 'active':
-                state = 'active'
-                print("Started by button")
-        # Stop button
-        if (STOP_BTN[0] <= x <= STOP_BTN[2] and
-            STOP_BTN[1] <= y <= STOP_BTN[3]):
-            if state != 'idle':
-                state = 'idle'
-                print("Stopped by button")
-        # Close button
-        if (CLOSE_BTN[0] <= x <= CLOSE_BTN[2] and
-            CLOSE_BTN[1] <= y <= CLOSE_BTN[3]):
-            exit_app = True
-            print("Exit requested")
+        bg_color = '#f0f2f5'
+        fg_color = '#1a1a1a'
+        accent = '#2c7da0'
+        accent_light = '#61a5c2'
+        button_bg = '#ffffff'
+        button_active = '#e9ecef'
 
-cv2.setMouseCallback(window_name, mouse_callback)
+        style.configure('TFrame', background=bg_color)
+        style.configure('TLabel', background=bg_color, foreground=fg_color, font=('Segoe UI', 10))
+        style.configure('TLabelframe', background=bg_color, foreground=fg_color, font=('Segoe UI', 10, 'bold'))
+        style.configure('TLabelframe.Label', background=bg_color, foreground=fg_color, font=('Segoe UI', 10, 'bold'))
+        style.configure('TButton', background=button_bg, foreground=fg_color, font=('Segoe UI', 10), borderwidth=0, focusthickness=0)
+        style.map('TButton', background=[('active', button_active), ('pressed', '#dee2e6')])
+        style.configure('Accent.TButton', background=accent, foreground='white')
+        style.map('Accent.TButton', background=[('active', accent_light), ('pressed', '#1f5068')])
 
-cap = cv2.VideoCapture(0)
+    def setup_ui_grid(self):
+        # Main container using grid with equal columns (half-half)
+        main_container = ttk.Frame(self.root, padding=20)
+        main_container.grid(row=0, column=0, sticky="nsew")
+        self.root.grid_rowconfigure(0, weight=1)
+        self.root.grid_columnconfigure(0, weight=1)
+        main_container.grid_rowconfigure(0, weight=1)
+        main_container.grid_columnconfigure(0, weight=1)  # video takes half
+        main_container.grid_columnconfigure(1, weight=1)  # controls takes half
 
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        break
+        # Left panel: Video feed (half width)
+        video_card = ttk.LabelFrame(main_container, text="📷 Camera Feed", padding=10)
+        video_card.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
 
-    frame = cv2.flip(frame, 1)
-    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    results = face_mesh.process(rgb_frame)
+        self.video_label = ttk.Label(video_card, background='#000000')
+        self.video_label.pack(fill=tk.BOTH, expand=True)
 
-    frame_h, frame_w, _ = frame.shape
+        # Right panel: Controls (half width)
+        controls_card = ttk.Frame(main_container)
+        controls_card.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
 
-    # Create blank canvas for GUI
-    canvas = np.ones((600, 1000, 3), dtype=np.uint8) * 255  # white background
+        # Header
+        header = ttk.Label(controls_card, text="Hands‑Free Control Panel", font=('Segoe UI', 16, 'bold'))
+        header.pack(pady=(0, 15))
 
-    # Place video feed
-    video_frame = cv2.resize(frame, (VIDEO_WIDTH, VIDEO_HEIGHT))
-    canvas[VIDEO_Y:VIDEO_Y+VIDEO_HEIGHT, VIDEO_X:VIDEO_X+VIDEO_WIDTH] = video_frame
+        # Buttons row
+        btn_frame = ttk.Frame(controls_card)
+        btn_frame.pack(pady=5, fill=tk.X)
 
-    # Draw buttons
-    # Start
-    cv2.rectangle(canvas, (START_BTN[0], START_BTN[1]),
-                  (START_BTN[2], START_BTN[3]), (0, 200, 0), -1)
-    cv2.putText(canvas, "START", (START_BTN[0]+30, START_BTN[1]+35),
-                cv2.FONT_HERSHEY_SIMPLEX, 1, (255,255,255), 2)
-    # Stop
-    cv2.rectangle(canvas, (STOP_BTN[0], STOP_BTN[1]),
-                  (STOP_BTN[2], STOP_BTN[3]), (0, 0, 200), -1)
-    cv2.putText(canvas, "STOP", (STOP_BTN[0]+35, STOP_BTN[1]+35),
-                cv2.FONT_HERSHEY_SIMPLEX, 1, (255,255,255), 2)
-    # Exit
-    cv2.rectangle(canvas, (CLOSE_BTN[0], CLOSE_BTN[1]),
-                  (CLOSE_BTN[2], CLOSE_BTN[3]), (100, 100, 100), -1)
-    cv2.putText(canvas, "EXIT", (CLOSE_BTN[0]+35, CLOSE_BTN[1]+35),
-                cv2.FONT_HERSHEY_SIMPLEX, 1, (255,255,255), 2)
+        self.start_btn = ttk.Button(btn_frame, text="▶ Start", command=self.start_controller, style='Accent.TButton')
+        self.start_btn.pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
 
-    # Instructions
-    y0 = 250
-    cv2.putText(canvas, "How to use:", (700, y0), cv2.FONT_HERSHEY_SIMPLEX,
-                0.7, (0,0,0), 2)
-    instructions = [
-        "1. Click START or nod 3 times to begin",
-        "2. Move head to move cursor",
-        "3. Close eyes for 2 seconds to click",
-        "4. You will hear 'button clicked' when action is performed",
-        "5. To stop: click STOP or move head left-right-left",
-        "6. Click EXIT to close"
-    ]
-    for i, line in enumerate(instructions):
-        y = y0 + 30 + i*25
-        cv2.putText(canvas, line, (700, y), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5, (50,50,50), 1)
+        self.stop_btn = ttk.Button(btn_frame, text="⏹ Stop", command=self.stop_controller, state=tk.DISABLED)
+        self.stop_btn.pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
 
-    # Status display
-    if state == 'active':
-        cv2.putText(canvas, "STATUS: ACTIVE", (700, 400),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,150,0), 2)
-    elif state == 'starting':
-        remaining = max(0, int(start_countdown_end - time.time()))
-        cv2.putText(canvas, f"STATUS: STARTING in {remaining}s", (700, 400),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (200,100,0), 2)
-    else:
-        cv2.putText(canvas, "STATUS: IDLE", (700, 400),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (150,0,0), 2)
+        self.keyboard_btn = ttk.Button(btn_frame, text="⌨ Keyboard", command=self.open_keyboard)
+        self.keyboard_btn.pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
 
-    if results.multi_face_landmarks:
-        for face_landmarks in results.multi_face_landmarks:
-            landmarks = face_landmarks.landmark
+        self.emergency_btn = tk.Button(
+            btn_frame, text="🚨 EMERGENCY", command=self.emergency_alert,
+            bg='#dc3545', fg='white', font=('Segoe UI', 10, 'bold'),
+            relief=tk.FLAT, activebackground='#c82333', activeforeground='white'
+        )
+        self.emergency_btn.pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
 
-            # Nose tip for movement & gestures
-            nose = landmarks[1]
-            nose_x = int(nose.x * frame_w)
-            nose_y = int(nose.y * frame_h)
+        self.exit_btn = ttk.Button(btn_frame, text="✖ Exit", command=self.exit_app)
+        self.exit_btn.pack(side=tk.LEFT, padx=5, expand=True, fill=tk.X)
 
-            current_time = time.time()
+        # Status card
+        status_card = ttk.LabelFrame(controls_card, text="Status", padding=10)
+        status_card.pack(fill=tk.X, pady=15)
 
-            if state == 'idle':
-                if 'prev_nose_y' not in locals():
-                    prev_nose_y = nose_y
+        self.status_label = ttk.Label(status_card, textvariable=self.status_var, font=('Segoe UI', 10, 'italic'), foreground='#2c7da0')
+        self.status_label.pack(anchor=tk.W)
 
-                diff_y = nose_y - prev_nose_y   # positive = down
+        # Sensitivity settings
+        sens_card = ttk.LabelFrame(controls_card, text="⚙ Sensitivity", padding=10)
+        sens_card.pack(fill=tk.X, pady=10)
 
-                if nod_state == 'up' and diff_y > NOD_THRESHOLD:
-                    nod_state = 'down'
-                    nod_start_time = current_time
-                elif nod_state == 'down' and diff_y < -NOD_THRESHOLD:
-                    nod_count += 1
-                    nod_state = 'up'
-                    nod_start_time = current_time
+        ttk.Label(sens_card, text="Mouse Smoothing:").grid(row=0, column=0, sticky=tk.W, pady=5)
+        smooth_scale = ttk.Scale(sens_card, from_=1, to=10, variable=self.smooth_var, orient=tk.HORIZONTAL)
+        smooth_scale.grid(row=0, column=1, sticky=tk.EW, padx=10)
+        ttk.Label(sens_card, textvariable=self.smooth_var).grid(row=0, column=2)
 
-                # Timeout
-                if current_time - nod_start_time > NOD_TIMEOUT:
-                    nod_count = 0
-                    nod_state = 'up'
+        ttk.Label(sens_card, text="Click Duration (s):").grid(row=1, column=0, sticky=tk.W, pady=5)
+        duration_scale = ttk.Scale(sens_card, from_=0.5, to=5.0, variable=self.click_duration_var, orient=tk.HORIZONTAL)
+        duration_scale.grid(row=1, column=1, sticky=tk.EW, padx=10)
+        ttk.Label(sens_card, textvariable=self.click_duration_var).grid(row=1, column=2)
 
-                if nod_count >= 3:
-                    state = 'starting'
-                    start_countdown_end = current_time + 5
-                    nod_count = 0
-                    nod_state = 'up'
-                    print("Nod detected: starting in 5 seconds")
+        sens_card.columnconfigure(1, weight=1)
 
-                prev_nose_y = nose_y
+        # Quick actions
+        quick_card = ttk.LabelFrame(controls_card, text="⚡ Quick Actions (hover & close eyes)", padding=10)
+        quick_card.pack(fill=tk.X, pady=10)
 
-            if state == 'active':
-                if 'prev_nose_x' not in locals():
-                    prev_nose_x = nose_x
+        quick_actions = [
+            ("🍔 Hungry", "hungry"), ("💧 Thirsty", "thirsty"), ("🆘 Help", "help"),
+            ("🚨 Emergency", "emergency"), ("🚪 Take me out", "take me out"), ("💧 Water", "water"),
+            ("🚽 Bathroom", "bathroom"), ("🤕 Pain", "pain"), ("⚠️ I need attention", "attention")
+        ]
+        for text, phrase in quick_actions:
+            btn = ttk.Button(quick_card, text=text, width=18)
+            btn.pack(pady=2, fill=tk.X)
+            self.quick_buttons.append({'widget': btn, 'phrase': phrase, 'rect': None})
 
-                diff_x = nose_x - prev_nose_x   # positive = right
+        # Test TTS
+        test_btn = ttk.Button(controls_card, text="🔊 Test Voice", command=self.test_tts)
+        test_btn.pack(pady=5, fill=tk.X)
 
-                if lr_state == 'neutral':
-                    if diff_x < -LR_THRESHOLD:
-                        lr_state = 'left'
-                        lr_count = 1
-                        lr_start_time = current_time
-                    elif diff_x > LR_THRESHOLD:
-                        lr_state = 'right'
-                        lr_count = 1
-                        lr_start_time = current_time
-                elif lr_state == 'left':
-                    if diff_x > LR_THRESHOLD:
-                        lr_state = 'right'
-                        lr_count = 2
-                        lr_start_time = current_time
-                elif lr_state == 'right':
-                    if diff_x < -LR_THRESHOLD:
-                        lr_state = 'left'
-                        lr_count = 3
-                        lr_start_time = current_time
+        # Instructions
+        instr_card = ttk.LabelFrame(controls_card, text="📖 Quick Guide", padding=10)
+        instr_card.pack(fill=tk.BOTH, expand=True, pady=10)
 
-                if lr_count == 3:
-                    state = 'idle'
-                    print("Left‑right‑left detected: stopped")
-                    lr_count = 0
-                    lr_state = 'neutral'
+        instructions = [
+            "▶ Start: Nod 3x / open hand / click Start",
+            "⏹ Stop: head left→right→left / fist / Stop button",
+            "🖱 Move: move your nose (laser pointer)",
+            "👆 Click: close eyes for 2 seconds",
+            "⚡ Quick actions: hover + close eyes",
+            "⌨ Keyboard: click button or show both open hands",
+            "🚨 Emergency: sends email alert"
+        ]
+        for line in instructions:
+            ttk.Label(instr_card, text=line, justify=tk.LEFT).pack(anchor=tk.W, pady=2)
 
-                if current_time - lr_start_time > LR_TIMEOUT:
-                    lr_count = 0
-                    lr_state = 'neutral'
+    def update_sensitivity(self, *args):
+        if hasattr(self, 'controller'):
+            self.controller.smooth_factor = self.smooth_var.get()
+            self.controller.LONG_CLOSURE_DURATION = self.click_duration_var.get()
 
-                prev_nose_x = nose_x
+    def update_click_duration(self, *args):
+        if hasattr(self, 'controller'):
+            self.controller.LONG_CLOSURE_DURATION = self.click_duration_var.get()
 
-            if state == 'active':
-                # ---- Mouse movement ----
-                screen_x = np.interp(nose_x, [100, frame_w-100], [0, screen_w])
-                screen_y = np.interp(nose_y, [100, frame_h-100], [0, screen_h])
+    def update_button_rects(self):
+        for btn_info in self.quick_buttons:
+            widget = btn_info['widget']
+            widget.update_idletasks()
+            x = widget.winfo_rootx()
+            y = widget.winfo_rooty()
+            w = widget.winfo_width()
+            h = widget.winfo_height()
+            btn_info['rect'] = (x, y, x + w, y + h)
 
-                curr_x = prev_x + (screen_x - prev_x) / smoothening
-                curr_y = prev_y + (screen_y - prev_y) / smoothening
+    def on_window_resize(self, event):
+        self.root.after(100, self.update_button_rects)
 
-                pyautogui.moveTo(curr_x, curr_y)
-                prev_x, prev_y = curr_x, curr_y
+    def handle_button_click(self, x, y):
+        for btn_info in self.quick_buttons:
+            rect = btn_info['rect']
+            if rect and rect[0] <= x <= rect[2] and rect[1] <= y <= rect[3]:
+                phrase = btn_info['phrase']
+                
+                # Speak the phrase
+                self.controller.speak_repeated(phrase, 3)
 
-                # ---- Eye state detection (both eyes) ----
-                ear_left = eye_aspect_ratio(landmarks, LEFT_EYE, frame_w, frame_h)
-                ear_right = eye_aspect_ratio(landmarks, RIGHT_EYE, frame_w, frame_h)
-                ear = (ear_left + ear_right) / 2.0
+                # Log to Excel
+                self.log_action(f"Quick Action Triggered: {phrase.capitalize()}")
 
-                # ---- Long‑closure detection (eyes kept closed) ----
-                if ear < BLINK_THRESHOLD:   # eyes closed
-                    if long_closure_start == 0:
-                        long_closure_start = time.time()
-                        long_closure_triggered = False
-                    else:
-                        # If eyes remain closed beyond LONG_CLOSURE_DURATION, trigger action once
-                        if not long_closure_triggered and (time.time() - long_closure_start) >= LONG_CLOSURE_DURATION:
-                            print("Long closure detected: performing click")
-                            LONG_CLOSURE_ACTION()   # e.g., left click
-                            # Speak feedback
-                            tts_engine.say("button clicked")
-                            tts_engine.runAndWait()
-                            long_closure_triggered = True
-                else:                         # eyes open
-                    long_closure_start = 0
-                    long_closure_triggered = False
+                # Background email logic
+                if phrase == "emergency":
+                    self.controller.send_emergency_email()
+                
+                return True
+        return False
 
-    if state == 'starting' and time.time() >= start_countdown_end:
-        state = 'active'
-        print("Countdown finished: now active.")
+    def emergency_alert(self):
+        self.log_action("Emergency Dashboard Button Clicked")
+        self.controller.send_emergency_email()
 
-    if exit_app:
-        break
+    def start_controller(self):
+        self.log_action("Controller Started")
+        self.controller.start()
+        self.start_btn.config(state=tk.DISABLED)
+        self.stop_btn.config(state=tk.NORMAL)
+        self.status_var.set("Controller started – move your nose")
 
-    cv2.imshow(window_name, canvas)
+    def stop_controller(self):
+        self.log_action("Controller Stopped")
+        self.controller.stop()
+        self.start_btn.config(state=tk.NORMAL)
+        self.stop_btn.config(state=tk.DISABLED)
+        self.status_var.set("Controller stopped")
 
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+    def open_keyboard(self):
+        self.log_action("Keyboard Opened")
+        self.controller.open_keyboard()
 
-cap.release()
-cv2.destroyAllWindows()
+    def test_tts(self):
+        self.log_action("Voice Tested")
+        self.controller.speak_repeated("Voice test successful", 1)
+
+    def exit_app(self):
+        self.log_action("Application Exited")
+        self.controller.stop()
+        self.root.quit()
+        self.root.destroy()
+
+    def update_gui(self, frame, status_text):
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        img = Image.fromarray(frame_rgb)
+        video_width = self.video_label.winfo_width()
+        video_height = self.video_label.winfo_height()
+        if video_width > 1 and video_height > 1:
+            img = img.resize((video_width, video_height), Image.Resampling.LANCZOS)
+        imgtk = ImageTk.PhotoImage(image=img)
+        self.root.after(0, self._display_frame, imgtk, status_text)
+
+    def _display_frame(self, imgtk, status_text):
+        self.video_label.config(image=imgtk)
+        self.video_label.image = imgtk
+        self.status_var.set(status_text)
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = PremiumApp(root)
+    root.mainloop()
